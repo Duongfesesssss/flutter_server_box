@@ -1,0 +1,83 @@
+name: Build APK (voice)
+
+# Build bản thử nghiệm có tính năng giọng nói cho điện thoại Android (arm64).
+# Chạy tay: tab Actions → "Build APK (voice)" → Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          lfs: true
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Áp bản vá giọng nói
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f voice-feature.patch ]; then
+            git -c user.email=ci@local -c user.name=ci am --3way voice-feature.patch \
+              || { git am --abort; git apply --3way voice-feature.patch; }
+          else
+            echo "::error::Không thấy voice-feature.patch ở thư mục gốc của repo"
+            exit 1
+          fi
+
+      - name: Install Flutter
+        uses: ./.github/actions/setup-flutter
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: "zulu"
+          java-version: "21"
+
+      - name: Install Android SDK / NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          compile_sdk="$(tr -d '[:space:]' < android/compile-sdk-version.txt)"
+          build_tools="$(tr -d '[:space:]' < android/build-tools-version.txt)"
+          ndk_version="$(tr -d '[:space:]' < android/ndk-version.txt)"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-$compile_sdk" "build-tools;$build_tools" "ndk;$ndk_version"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ndk_version" >> "$GITHUB_ENV"
+          echo "APKSIGNER=$ANDROID_HOME/build-tools/$build_tools/apksigner" >> "$GITHUB_ENV"
+
+      # Bản vá thêm 2 thư viện mới nên pubspec.lock phải cập nhật trước khi
+      # script build (vốn khoá theo lockfile) chạy.
+      - name: Cập nhật thư viện
+        run: flutter pub get
+
+      - name: Build
+        shell: bash
+        run: scripts/release/build-fdroid.sh arm64
+
+      - name: Ký APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find build -name 'app-arm64-v8a-release-unsigned.apk' | head -1)"
+          [ -n "$apk" ] || { echo "::error::Không tìm thấy APK"; exit 1; }
+          keytool -genkeypair -keystore ci.jks -storepass android -keypass android \
+            -alias voice -keyalg RSA -keysize 2048 -validity 3650 \
+            -dname "CN=ServerBox Voice"
+          mkdir -p out
+          "$APKSIGNER" sign --ks ci.jks --ks-pass pass:android --key-pass pass:android \
+            --out out/ServerBox-voice-arm64.apk "$apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ServerBox-voice-arm64
+          path: out/ServerBox-voice-arm64.apk
+          retention-days: 14
