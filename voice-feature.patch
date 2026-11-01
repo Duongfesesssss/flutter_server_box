@@ -1,0 +1,994 @@
+From 0ffd4f51c6ac05e247d52c8b19aa11269b022561 Mon Sep 17 00:00:00 2001
+From: me <me@local>
+Date: Sun, 1 Nov 2026 08:56:01 +0000
+Subject: [PATCH] Voice control for terminal (personal)
+
+---
+ VOICE_VI.md                                |  43 +++
+ android/app/src/main/AndroidManifest.xml   |   8 +
+ ios/Runner/Info.plist                      |   4 +
+ lib/core/voice/reply_extractor.dart        | 129 +++++++
+ lib/core/voice/voice_engine.dart           | 112 ++++++
+ lib/data/store/setting.dart                |  24 ++
+ lib/view/page/setting/entries/ssh.dart     |  29 ++
+ lib/view/page/setting/entry.dart           |   1 +
+ lib/view/page/ssh/page/page.dart           |  22 +-
+ lib/view/widget/voice_terminal_button.dart | 393 +++++++++++++++++++++
+ pubspec.yaml                               |   4 +
+ test/unit/voice/reply_extractor_test.dart  |  62 ++++
+ 12 files changed, 829 insertions(+), 2 deletions(-)
+ create mode 100644 VOICE_VI.md
+ create mode 100644 lib/core/voice/reply_extractor.dart
+ create mode 100644 lib/core/voice/voice_engine.dart
+ create mode 100644 lib/view/widget/voice_terminal_button.dart
+ create mode 100644 test/unit/voice/reply_extractor_test.dart
+
+diff --git a/VOICE_VI.md b/VOICE_VI.md
+new file mode 100644
+index 0000000..86c457b
+--- /dev/null
++++ b/VOICE_VI.md
+@@ -0,0 +1,43 @@
++# Điều khiển terminal bằng giọng nói (bản cá nhân)
++
++Phát triển thêm trên ServerBox (https://github.com/lollipopkit/flutter_server_box), giấy phép AGPL v3.
++
++## Tính năng
++- Nút micro nổi ở góc dưới phải terminal (chỉ trên điện thoại).
++- **Chạm**: bắt đầu nghe. Ngừng nói 3 giây (hoặc chạm lần nữa) → câu nói được dán vào terminal và nhấn Enter.
++- **Nhấn giữ**: mở cài đặt giọng nói. Cũng có trong Cài đặt → SSH → Giọng nói.
++- Tùy chọn bật/tắt:
++  - Tự gửi (Enter): tắt để xem lại câu trước khi gửi.
++  - Đọc câu trả lời: chờ Claude Code / Codex làm xong rồi đọc thành tiếng.
++  - Chế độ hội thoại: đọc xong tự nghe tiếp.
++  - Khẩu lệnh: nói đúng "đồng ý" / "ok" = Enter (duyệt quyền), "từ chối" / "hủy" / "dừng lại" = Esc.
++  - Ngôn ngữ (Tiếng Việt / English), tốc độ đọc.
++
++## File đã thêm / sửa
++- lib/core/voice/reply_extractor.dart   — lọc câu trả lời của agent từ màn hình terminal
++- lib/core/voice/voice_engine.dart      — nhận dạng giọng nói + đọc văn bản, khẩu lệnh
++- lib/view/widget/voice_terminal_button.dart — nút micro, vòng nghe → gửi → chờ → đọc
++- lib/view/page/ssh/page/page.dart      — gắn nút vào terminal
++- lib/data/store/setting.dart           — các tùy chọn voice*
++- lib/view/page/setting/entries/ssh.dart, entry.dart — mục Giọng nói trong Cài đặt
++- pubspec.yaml                          — speech_to_text, flutter_tts
++- android/app/src/main/AndroidManifest.xml, ios/Runner/Info.plist — quyền micro
++- test/unit/voice/reply_extractor_test.dart
++
++## Build
++1. Cài Flutter (bản >= 3.47) và Rust (rustup) — dự án có phần Rust build tự động.
++2. Lấy submodule:  git submodule update --init --recursive
++3. flutter pub get
++4. Android: cắm điện thoại (bật USB debugging) → flutter run
++   iOS: cần máy Mac + Xcode, mở ios/Runner.xcworkspace, chọn Apple ID của bạn ở Signing → flutter run
++5. Chạy test: flutter test test/unit/voice
++
++## Phía máy tính
++- Bật SSH server (Windows: Settings → System → Optional features → OpenSSH Server; macOS: System Settings → General → Sharing → Remote Login; Linux: cài openssh-server).
++- Cài Tailscale lên máy tính và điện thoại để kết nối từ mọi nơi.
++- Nên chạy Claude Code / Codex trong tmux, để mất mạng không mất phiên: tmux new -s ai  →  claude
++
++## Giới hạn hiện tại
++- Câu trả lời được lấy bằng cách đọc màn hình, nên đôi khi lẫn chữ thừa hoặc bỏ sót nếu agent đổi giao diện.
++  Hướng nâng cấp: dùng hook "Stop" của Claude Code ghi câu trả lời cuối ra file, app đọc file đó qua SSH.
++- Nhận dạng giọng nói dùng engine của điện thoại (Google / Apple); tiếng Việt cần có gói ngôn ngữ trên máy.
+diff --git a/android/app/src/main/AndroidManifest.xml b/android/app/src/main/AndroidManifest.xml
+index 020924c..841dd6e 100644
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -2,6 +2,7 @@
+     xmlns:android="http://schemas.android.com/apk/res/android">
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+     <uses-permission
+         android:name="android.permission.READ_EXTERNAL_STORAGE"
+         android:maxSdkVersion="32" />
+@@ -282,6 +283,13 @@
+ 
+          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+     <queries>
++        <!-- Giọng nói: tìm engine nhận dạng giọng nói và đọc văn bản. -->
++        <intent>
++            <action android:name="android.speech.RecognitionService" />
++        </intent>
++        <intent>
++            <action android:name="android.intent.action.TTS_SERVICE" />
++        </intent>
+         <intent>
+             <action android:name="android.intent.action.PROCESS_TEXT" />
+             <data android:mimeType="text/plain" />
+diff --git a/ios/Runner/Info.plist b/ios/Runner/Info.plist
+index ed3c3d0..cfe6025 100644
+--- a/ios/Runner/Info.plist
++++ b/ios/Runner/Info.plist
+@@ -26,6 +26,10 @@
+ 		<true />
+ 		<key>NSLocationWhenInUseUsageDescription</key>
+ 		<string>ServerBox may access location metadata embedded in files you choose to import.</string>
++		<key>NSMicrophoneUsageDescription</key>
++		<string>ServerBox dùng micro để bạn ra lệnh bằng giọng nói trong terminal.</string>
++		<key>NSSpeechRecognitionUsageDescription</key>
++		<string>ServerBox chuyển giọng nói của bạn thành chữ để gửi vào terminal.</string>
+ 		<key>NSCameraUsageDescription</key>
+ 		<string>ServerBox uses the camera when you take a photo to attach to an Agent message.</string>
+ 		<key>NSPhotoLibraryUsageDescription</key>
+diff --git a/lib/core/voice/reply_extractor.dart b/lib/core/voice/reply_extractor.dart
+new file mode 100644
+index 0000000..2a15595
+--- /dev/null
++++ b/lib/core/voice/reply_extractor.dart
+@@ -0,0 +1,129 @@
++/// Lấy câu trả lời của một agent (Claude Code, Codex, ...) ra khỏi màn hình
++/// terminal, để đọc thành tiếng.
++///
++/// Thuần Dart, không phụ thuộc Flutter, để test được bằng `flutter test`.
++///
++/// Cách làm: tìm dòng có câu lệnh vừa gửi (agent luôn in lại tin nhắn của
++/// người dùng, ví dụ `> sửa lỗi build` hoặc `› sửa lỗi build`), lấy các dòng
++/// phía sau cho tới ô nhập liệu tiếp theo, rồi bỏ những thứ không nên đọc:
++/// khung viền, spinner, lời gọi tool, kết quả tool, dòng gợi ý phím tắt.
++library;
++
++/// Agent còn đang chạy hay không. Cả Claude Code lẫn Codex đều hiện
++/// "esc to interrupt" trong lúc làm việc.
++bool agentLooksBusy(List<String> screenTail) {
++  for (final line in screenTail) {
++    final l = line.toLowerCase();
++    if (l.contains('to interrupt')) return true;
++  }
++  return false;
++}
++
++/// Trả về đoạn văn cần đọc, hoặc chuỗi rỗng nếu không tìm thấy.
++String extractAgentReply(
++  List<String> lines,
++  String sentText, {
++  int maxChars = 1500,
++}) {
++  final start = _findAnchor(lines, sentText);
++  if (start < 0) return '';
++
++  final kept = <String>[];
++  var skippingToolOutput = false;
++  for (var i = start + 1; i < lines.length; i++) {
++    final raw = lines[i];
++    if (_isInputBoxStart(raw)) break;
++
++    final trimmed = raw.trim();
++    // Kết quả tool của Claude Code thụt vào sau "⎿"; bỏ cả khối đó.
++    if (trimmed.startsWith('⎿')) {
++      skippingToolOutput = true;
++      continue;
++    }
++    if (skippingToolOutput) {
++      if (trimmed.isEmpty) continue;
++      // Khối kết quả tool kết thúc khi gặp một mục mới ở đầu dòng.
++      if (_startsNewItem(trimmed)) {
++        skippingToolOutput = false;
++      } else {
++        continue;
++      }
++    }
++
++    final cleaned = _clean(raw);
++    if (cleaned == null) continue;
++    kept.add(cleaned);
++  }
++
++  var text = kept.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
++  if (text.length > maxChars) {
++    final cut = text.lastIndexOf(RegExp(r'[.!?。]'), maxChars);
++    text = text.substring(0, cut > maxChars ~/ 2 ? cut + 1 : maxChars);
++  }
++  return text;
++}
++
++String _norm(String s) =>
++    s.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
++
++/// Dòng cuối cùng chứa câu lệnh đã gửi. Chỉ so phần đầu câu, vì câu dài sẽ
++/// bị agent xuống dòng.
++int _findAnchor(List<String> lines, String sentText) {
++  final sent = _norm(sentText);
++  if (sent.isEmpty) return -1;
++  final probe = sent.length > 24 ? sent.substring(0, 24) : sent;
++  for (var i = lines.length - 1; i >= 0; i--) {
++    if (_norm(lines[i]).contains(probe)) return i;
++  }
++  return -1;
++}
++
++final _hRule = RegExp(r'^[\s─━═╌╍\-]{12,}$');
++
++/// Ô nhập liệu của agent: viền trên của khung (Claude Code), một đường kẻ
++/// ngang dài (Claude Code bản mới), hoặc dấu nhắc trống `>` / `›` (Codex).
++bool _isInputBoxStart(String line) {
++  final t = line.trim();
++  if (t.startsWith('╭')) return true;
++  if (_hRule.hasMatch(line) && t.isNotEmpty) return true;
++  if (t == '>' || t == '›' || t == '│ >' || t.startsWith('│ > ')) return true;
++  return false;
++}
++
++bool _startsNewItem(String trimmed) =>
++    trimmed.startsWith('⏺') ||
++    trimmed.startsWith('●') ||
++    trimmed.startsWith('•');
++
++final _spinner = RegExp(r'^[✻✽✶✳✢·*✦◐◓◑◒⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*\S+…');
++final _toolCall = RegExp(r'^[A-Z][A-Za-z]+\(.*\)\s*$');
++final _boxChars = RegExp(r'[│╭╮╰╯├┤┬┴┼║╔╗╚╝]');
++final _leadMarker = RegExp(r'^[⏺●•◦▪]\s*');
++final _noise = [
++  'esc to interrupt',
++  'to interrupt',
++  '? for shortcuts',
++  'ctrl+',
++  'shift+tab',
++  'auto-accept',
++  'context left',
++  'tokens',
++  'press enter',
++];
++
++String? _clean(String raw) {
++  var t = raw.replaceAll(_boxChars, ' ').trim();
++  if (t.isEmpty) return null;
++  final lower = t.toLowerCase();
++  for (final n in _noise) {
++    if (lower.contains(n)) return null;
++  }
++  if (_spinner.hasMatch(t)) return null;
++  t = t.replaceFirst(_leadMarker, '');
++  if (_toolCall.hasMatch(t)) return null;
++  // Codex ghi lại lệnh nó chạy, ví dụ "Ran ls -la" hoặc "$ ls".
++  if (t.startsWith(r'$ ') || t.startsWith('Ran ')) return null;
++  // Markdown đọc lên rất khó nghe.
++  t = t.replaceAll(RegExp(r'[`*_#]+'), '');
++  return t.trim().isEmpty ? null : t.trim();
++}
+diff --git a/lib/core/voice/voice_engine.dart b/lib/core/voice/voice_engine.dart
+new file mode 100644
+index 0000000..2b97258
+--- /dev/null
++++ b/lib/core/voice/voice_engine.dart
+@@ -0,0 +1,112 @@
++import 'dart:async';
++
++import 'package:flutter_tts/flutter_tts.dart';
++import 'package:speech_to_text/speech_recognition_error.dart';
++import 'package:speech_to_text/speech_to_text.dart';
++
++/// Một nút micro duy nhất cho cả app: micro và loa của máy là tài nguyên
++/// dùng chung, hai terminal cùng nghe một lúc thì không có nghĩa.
++class VoiceEngine {
++  VoiceEngine._();
++  static final instance = VoiceEngine._();
++
++  final _stt = SpeechToText();
++  final _tts = FlutterTts();
++  bool _sttReady = false;
++  bool _ttsReady = false;
++
++  /// Gọi khi phiên nghe kết thúc vì lỗi hoặc vì người dùng ngừng nói.
++  void Function(String status)? onStatus;
++  void Function(String error)? onError;
++
++  bool get isListening => _stt.isListening;
++
++  Future<bool> _ensureStt() async {
++    if (_sttReady) return true;
++    _sttReady = await _stt.initialize(
++      onStatus: (s) => onStatus?.call(s),
++      onError: (SpeechRecognitionError e) => onError?.call(e.errorMsg),
++    );
++    return _sttReady;
++  }
++
++  Future<void> _ensureTts() async {
++    if (_ttsReady) return;
++    await _tts.awaitSpeakCompletion(true);
++    // iOS: sau khi thu âm, phiên âm thanh vẫn ở chế độ ghi âm và loa rất nhỏ.
++    // playAndRecord + defaultToSpeaker để đọc ra loa ngoài.
++    await _tts.setSharedInstance(true);
++    await _tts.setIosAudioCategory(
++      IosTextToSpeechAudioCategory.playAndRecord,
++      [
++        IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
++        IosTextToSpeechAudioCategoryOptions.allowBluetooth,
++        IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
++      ],
++      IosTextToSpeechAudioMode.defaultMode,
++    );
++    _ttsReady = true;
++  }
++
++  /// Bắt đầu nghe. [onWords] được gọi liên tục với câu đang nhận dạng,
++  /// `isFinal` = true khi người dùng ngừng nói.
++  ///
++  /// Trả về false nếu máy không có nhận dạng giọng nói hoặc bị từ chối quyền
++  /// micro.
++  Future<bool> listen({
++    required String locale,
++    required void Function(String words, bool isFinal) onWords,
++    Duration pauseFor = const Duration(seconds: 3),
++  }) async {
++    if (!await _ensureStt()) return false;
++    await _tts.stop();
++    await _stt.listen(
++      onResult: (r) => onWords(r.recognizedWords, r.finalResult),
++      // speech_to_text dùng dạng vi_VN, TTS dùng vi-VN.
++      // ignore: deprecated_member_use
++      localeId: locale.replaceAll('-', '_'),
++      listenFor: const Duration(minutes: 2),
++      pauseFor: pauseFor,
++      listenOptions: SpeechListenOptions(
++        partialResults: true,
++        cancelOnError: true,
++        listenMode: ListenMode.dictation,
++        autoPunctuation: true,
++      ),
++    );
++    return true;
++  }
++
++  Future<void> stopListening() => _stt.stop();
++  Future<void> cancelListening() => _stt.cancel();
++
++  /// Đọc [text], chờ đến khi đọc xong.
++  Future<void> speak(String text, {required String locale, double rate = 0.5}) async {
++    if (text.trim().isEmpty) return;
++    await _ensureTts();
++    await _tts.setLanguage(locale);
++    await _tts.setSpeechRate(rate);
++    await _tts.speak(text);
++  }
++
++  Future<void> stopSpeaking() => _tts.stop();
++}
++
++/// Câu nói ngắn được hiểu là một phím, không phải tin nhắn cho agent.
++/// Chỉ khớp khi cả câu đúng bằng khẩu lệnh, để "đồng ý với cách làm đó nhưng
++/// sửa lại tên hàm" vẫn được gửi nguyên văn.
++enum VoiceKeyword { enter, escape, interrupt }
++
++VoiceKeyword? matchVoiceKeyword(String words) {
++  final w = words.toLowerCase().replaceAll(RegExp(r'[.,!?]'), '').trim();
++  const enter = {
++    'đồng ý', 'ok', 'okay', 'oke', 'xác nhận', 'được', 'có', 'yes', 'enter',
++    'gửi', 'chấp nhận',
++  };
++  const escape = {'từ chối', 'không', 'no', 'thoát', 'escape', 'hủy', 'huỷ'};
++  const interrupt = {'dừng lại', 'dừng', 'stop', 'ngắt'};
++  if (enter.contains(w)) return VoiceKeyword.enter;
++  if (escape.contains(w)) return VoiceKeyword.escape;
++  if (interrupt.contains(w)) return VoiceKeyword.interrupt;
++  return null;
++}
+diff --git a/lib/data/store/setting.dart b/lib/data/store/setting.dart
+index e66b849..c81ca7a 100644
+--- a/lib/data/store/setting.dart
++++ b/lib/data/store/setting.dart
+@@ -1036,6 +1036,30 @@ class SettingStore extends SqliteStore with ThemeSettings {
+     fromObj: (obj) => obj is int && obj >= 0 ? obj : null,
+   );
+ 
++  // ---- Điều khiển bằng giọng nói trong terminal (bản cá nhân) ----
++
++  /// Hiện nút micro trên terminal.
++  late final voiceEnabled = propertyDefault('voiceEnabled', true);
++
++  /// Ngôn ngữ nhận dạng và đọc, dạng BCP-47: vi-VN, en-US.
++  late final voiceLocale = propertyDefault('voiceLocale', 'vi-VN');
++
++  /// Tự nhấn Enter sau khi dán câu nói vào terminal. Tắt để xem lại và sửa
++  /// trước khi gửi.
++  late final voiceAutoEnter = propertyDefault('voiceAutoEnter', true);
++
++  /// Đọc thành tiếng câu trả lời của agent khi nó làm xong.
++  late final voiceSpeakReply = propertyDefault('voiceSpeakReply', false);
++
++  /// Chế độ hội thoại: đọc xong thì tự nghe tiếp, không cần chạm.
++  late final voiceConversation = propertyDefault('voiceConversation', false);
++
++  /// Hiểu các câu ngắn như "đồng ý", "từ chối", "dừng lại" là phím.
++  late final voiceKeywords = propertyDefault('voiceKeywords', true);
++
++  /// Tốc độ đọc, 0.1 – 1.0.
++  late final voiceSpeechRate = propertyDefault('voiceSpeechRate', 0.5);
++
+   /// Removes settings for UI choices that no longer exist. Idempotent so old
+   /// installs are cleaned without another migration flag becoming permanent
+   /// state of its own.
+diff --git a/lib/view/page/setting/entries/ssh.dart b/lib/view/page/setting/entries/ssh.dart
+index f20d546..79a0f4c 100644
+--- a/lib/view/page/setting/entries/ssh.dart
++++ b/lib/view/page/setting/entries/ssh.dart
+@@ -33,6 +33,7 @@ extension _SSH on _AppSettingsPageState {
+         _buildSshBgOpacity(),
+         _buildSshBlurRadius(),
+       ]),
++      SettingsGroup('Giọng nói', [_buildVoiceEnabled(), _buildVoiceMore()]),
+       SettingsGroup(l10n.tmuxAutoAttach, [
+         _buildTmuxAutoToggle(),
+         _buildTmuxShowSelector(),
+@@ -477,6 +478,34 @@ extension _SSH on _AppSettingsPageState {
+     );
+   }
+ 
++  SettingsRow _buildVoiceEnabled() {
++    const label = 'Nút micro trên terminal';
++    return SettingsRow(
++      label,
++      () => ListTile(
++        leading: const Icon(Icons.mic_none),
++        title: const Text(label),
++        subtitle: const Text('Ra lệnh bằng giọng nói cho Claude Code, Codex'),
++        trailing: StoreSwitch(prop: _setting.voiceEnabled),
++      ),
++      keywords: 'voice mic giọng nói claude codex',
++    );
++  }
++
++  SettingsRow _buildVoiceMore() {
++    const label = 'Cài đặt giọng nói';
++    return SettingsRow(
++      label,
++      () => ListTile(
++        leading: const Icon(Icons.record_voice_over_outlined),
++        title: const Text(label),
++        trailing: const Icon(Icons.keyboard_arrow_right),
++        onTap: () => showVoiceSettingsSheet(context),
++      ),
++      keywords: 'voice tts speech đọc',
++    );
++  }
++
+   SettingsRow _buildLetterCache() {
+     final label = l10n.letterCache;
+     return SettingsRow(
+diff --git a/lib/view/page/setting/entry.dart b/lib/view/page/setting/entry.dart
+index 393a82b..e29407c 100644
+--- a/lib/view/page/setting/entry.dart
++++ b/lib/view/page/setting/entry.dart
+@@ -63,6 +63,7 @@ import 'package:server_box/view/widget/group_title.dart';
+ import 'package:server_box/view/widget/marked_title.dart';
+ import 'package:server_box/view/widget/pane_settings.dart';
+ import 'package:server_box/view/widget/rootfs_install.dart';
++import 'package:server_box/view/widget/voice_terminal_button.dart';
+ 
+ part 'about.dart';
+ part 'app_page.dart';
+diff --git a/lib/view/page/ssh/page/page.dart b/lib/view/page/ssh/page/page.dart
+index bdbf660..f58aeb6 100644
+--- a/lib/view/page/ssh/page/page.dart
++++ b/lib/view/page/ssh/page/page.dart
+@@ -56,6 +56,7 @@ import 'package:server_box/view/widget/terminal_status_dot.dart';
+ import 'package:server_box/view/widget/tmux_session_picker_sheet.dart';
+ import 'package:server_box/view/widget/tmux_window_bar.dart';
+ import 'package:server_box/view/widget/virt_key_semantics.dart';
++import 'package:server_box/view/widget/voice_terminal_button.dart';
+ import 'package:wakelock_plus/wakelock_plus.dart';
+ import 'package:xterm/core.dart';
+ import 'package:xterm/ui.dart' hide TerminalThemes;
+@@ -912,7 +913,24 @@ class SSHPageState extends ConsumerState<SSHPage>
+       ],
+     );
+ 
+-    Widget terminalContent = terminalWithProgress;
++    // Nút micro: ra lệnh bằng giọng nói cho chương trình đang chạy trong
++    // terminal (Claude Code, Codex, ...). Chỉ trên điện thoại. Stack luôn có
++    // mặt để terminal không bị dựng lại khi nút hiện ra.
++    final showVoice =
++        isMobile &&
++        Stores.setting.voiceEnabled.fetch() &&
++        (_adopted || _connectionStep == TerminalConnectionStep.ready);
++    Widget terminalContent = Stack(
++      children: [
++        terminalWithProgress,
++        if (showVoice)
++          Positioned(
++            right: 12,
++            bottom: 12,
++            child: VoiceTerminalButton(terminal: _terminal),
++          ),
++      ],
++    );
+     final step = _introStep;
+     final steps = _introSteps;
+     if (step != null && steps != null && step < steps.length) {
+@@ -921,7 +939,7 @@ class SSHPageState extends ConsumerState<SSHPage>
+       // while everything it says is below the tmux window bar.
+       terminalContent = Stack(
+         children: [
+-          terminalWithProgress,
++          terminalContent,
+           Positioned.fill(
+             child: GuideView(
+               steps: [for (final step in steps) step.guide],
+diff --git a/lib/view/widget/voice_terminal_button.dart b/lib/view/widget/voice_terminal_button.dart
+new file mode 100644
+index 0000000..d0aa1e8
+--- /dev/null
++++ b/lib/view/widget/voice_terminal_button.dart
+@@ -0,0 +1,393 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:server_box/core/voice/reply_extractor.dart';
++import 'package:server_box/core/voice/voice_engine.dart';
++import 'package:server_box/data/res/store.dart';
++import 'package:xterm/core.dart';
++
++enum _Phase { idle, listening, waiting, speaking }
++
++/// Nút micro nổi trên terminal.
++///
++/// - Chạm: bắt đầu nghe. Chạm lần nữa khi đang nghe: gửi ngay.
++/// - Chạm khi đang chờ/đang đọc: dừng.
++/// - Nhấn giữ: mở cài đặt giọng nói.
++///
++/// Câu nói được dán vào terminal (bracketed paste nếu chương trình hỗ trợ,
++/// như Claude Code và Codex), rồi nhấn Enter nếu bật tự gửi.
++class VoiceTerminalButton extends StatefulWidget {
++  const VoiceTerminalButton({super.key, required this.terminal});
++
++  final Terminal terminal;
++
++  @override
++  State<VoiceTerminalButton> createState() => _VoiceTerminalButtonState();
++}
++
++class _VoiceTerminalButtonState extends State<VoiceTerminalButton> {
++  final _engine = VoiceEngine.instance;
++  final _s = Stores.setting;
++
++  _Phase _phase = _Phase.idle;
++  String _words = '';
++  String? _hint;
++
++  /// Tăng mỗi lần terminal vẽ lại, để biết màn hình đã đứng yên chưa.
++  int _screenVersion = 0;
++  Timer? _settleTimer;
++  String _lastSent = '';
++  bool _submitting = false;
++
++  @override
++  void initState() {
++    super.initState();
++    widget.terminal.addListener(_onTerminalChanged);
++  }
++
++  @override
++  void dispose() {
++    widget.terminal.removeListener(_onTerminalChanged);
++    _settleTimer?.cancel();
++    if (_phase == _Phase.listening) unawaited(_engine.cancelListening());
++    if (_phase == _Phase.speaking) unawaited(_engine.stopSpeaking());
++    super.dispose();
++  }
++
++  void _onTerminalChanged() => _screenVersion++;
++
++  void _setPhase(_Phase p, {String? hint}) {
++    if (!mounted) return;
++    setState(() {
++      _phase = p;
++      _hint = hint;
++      if (p != _Phase.listening) _words = '';
++    });
++  }
++
++  // ---------------------------------------------------------------- nghe
++
++  Future<void> _startListening() async {
++    HapticFeedback.mediumImpact();
++    _words = '';
++    _engine.onError = (e) {
++      if (_phase == _Phase.listening) {
++        _setPhase(_Phase.idle, hint: 'Lỗi micro: $e');
++      }
++    };
++    // Micro tự tắt (hết thời gian, im lặng) mà không có kết quả cuối: gửi
++    // những gì đã nghe được, hoặc quay về trạng thái chờ nếu chưa nghe gì.
++    _engine.onStatus = (status) {
++      if (status != 'done' && status != 'notListening') return;
++      Future.delayed(const Duration(milliseconds: 600), () {
++        if (mounted && _phase == _Phase.listening && !_submitting) {
++          unawaited(_submit(_words));
++        }
++      });
++    };
++    final ok = await _engine.listen(
++      locale: _s.voiceLocale.fetch(),
++      onWords: (words, isFinal) {
++        if (!mounted) return;
++        setState(() => _words = words);
++        if (isFinal) unawaited(_submit(words));
++      },
++    );
++    if (!ok) {
++      _setPhase(
++        _Phase.idle,
++        hint: 'Không dùng được nhận dạng giọng nói. Kiểm tra quyền micro.',
++      );
++      return;
++    }
++    _setPhase(_Phase.listening);
++  }
++
++  Future<void> _submit(String words) async {
++    if (_phase != _Phase.listening || _submitting) return;
++    _submitting = true;
++    try {
++      await _submitInner(words);
++    } finally {
++      _submitting = false;
++    }
++  }
++
++  Future<void> _submitInner(String words) async {
++    await _engine.stopListening();
++    final text = words.trim();
++    if (text.isEmpty) {
++      _setPhase(_Phase.idle, hint: 'Không nghe thấy gì.');
++      return;
++    }
++
++    if (_s.voiceKeywords.fetch()) {
++      switch (matchVoiceKeyword(text)) {
++        case VoiceKeyword.enter:
++          widget.terminal.keyInput(TerminalKey.enter);
++          return _afterSend(text, expectReply: true);
++        case VoiceKeyword.escape:
++        case VoiceKeyword.interrupt:
++          widget.terminal.keyInput(TerminalKey.escape);
++          return _setPhase(_Phase.idle, hint: 'Đã gửi Esc');
++        case null:
++          break;
++      }
++    }
++
++    widget.terminal.paste(text);
++    if (!_s.voiceAutoEnter.fetch()) {
++      _setPhase(_Phase.idle, hint: 'Đã dán, nhấn Enter để gửi');
++      return;
++    }
++    // Chờ một chút để chương trình nhận hết phần dán rồi mới Enter; gửi liền
++    // thì có agent coi Enter là một phần của đoạn dán.
++    await Future.delayed(const Duration(milliseconds: 150));
++    widget.terminal.keyInput(TerminalKey.enter);
++    _lastSent = text;
++    await _afterSend(text, expectReply: true);
++  }
++
++  // ------------------------------------------------------------ chờ trả lời
++
++  Future<void> _afterSend(String text, {required bool expectReply}) async {
++    if (!expectReply || !_s.voiceSpeakReply.fetch()) {
++      _setPhase(_Phase.idle);
++      return;
++    }
++    _setPhase(_Phase.waiting);
++    _waitForReply();
++  }
++
++  /// Màn hình đứng yên 2,5 giây và agent không còn "esc to interrupt" thì coi
++  /// như đã trả lời xong. Tối đa 15 phút.
++  void _waitForReply() {
++    _settleTimer?.cancel();
++    final started = DateTime.now();
++    var lastVersion = _screenVersion;
++    var stableSince = DateTime.now();
++
++    _settleTimer = Timer.periodic(const Duration(milliseconds: 400), (t) {
++      if (!mounted || _phase != _Phase.waiting) return t.cancel();
++      final now = DateTime.now();
++      if (now.difference(started) > const Duration(minutes: 15)) {
++        t.cancel();
++        return _setPhase(_Phase.idle, hint: 'Hết thời gian chờ');
++      }
++      if (_screenVersion != lastVersion) {
++        lastVersion = _screenVersion;
++        stableSince = now;
++        return;
++      }
++      if (now.difference(started) < const Duration(milliseconds: 1500)) return;
++      if (now.difference(stableSince) < const Duration(milliseconds: 2500)) {
++        return;
++      }
++      final lines = _screenLines();
++      final tail = lines.length > 15 ? lines.sublist(lines.length - 15) : lines;
++      if (agentLooksBusy(tail)) return;
++
++      t.cancel();
++      unawaited(_speakReply(lines));
++    });
++  }
++
++  /// Các dòng logic của màn hình: dòng bị xuống dòng tự động được nối lại.
++  List<String> _screenLines() {
++    final out = <String>[];
++    for (final line in widget.terminal.buffer.lines.toList()) {
++      final text = line.getText();
++      if (line.isWrapped && out.isNotEmpty) {
++        out[out.length - 1] = out.last + text;
++      } else {
++        out.add(text);
++      }
++    }
++    return out;
++  }
++
++  Future<void> _speakReply(List<String> lines) async {
++    final reply = extractAgentReply(lines, _lastSent);
++    if (reply.isEmpty) {
++      _setPhase(_Phase.idle, hint: 'Không tìm thấy câu trả lời để đọc');
++      return;
++    }
++    _setPhase(_Phase.speaking);
++    await _engine.speak(
++      reply,
++      locale: _s.voiceLocale.fetch(),
++      rate: _s.voiceSpeechRate.fetch(),
++    );
++    if (!mounted || _phase != _Phase.speaking) return;
++    if (_s.voiceConversation.fetch()) {
++      await _startListening();
++    } else {
++      _setPhase(_Phase.idle);
++    }
++  }
++
++  // -------------------------------------------------------------- nút bấm
++
++  Future<void> _onTap() async {
++    switch (_phase) {
++      case _Phase.idle:
++        await _startListening();
++      case _Phase.listening:
++        await _submit(_words);
++      case _Phase.waiting:
++        _settleTimer?.cancel();
++        _setPhase(_Phase.idle);
++      case _Phase.speaking:
++        await _engine.stopSpeaking();
++        _setPhase(_Phase.idle);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final scheme = Theme.of(context).colorScheme;
++    final (icon, color) = switch (_phase) {
++      _Phase.idle => (Icons.mic_none, scheme.primaryContainer),
++      _Phase.listening => (Icons.mic, scheme.errorContainer),
++      _Phase.waiting => (Icons.hourglass_top, scheme.secondaryContainer),
++      _Phase.speaking => (Icons.volume_up, scheme.tertiaryContainer),
++    };
++    final label = switch (_phase) {
++      _Phase.listening => _words.isEmpty ? 'Đang nghe…' : _words,
++      _Phase.waiting => 'Đang chờ agent trả lời… (chạm để bỏ)',
++      _Phase.speaking => 'Đang đọc… (chạm để dừng)',
++      _Phase.idle => _hint,
++    };
++
++    return Column(
++      mainAxisSize: MainAxisSize.min,
++      crossAxisAlignment: CrossAxisAlignment.end,
++      children: [
++        if (label != null && label.isNotEmpty)
++          ConstrainedBox(
++            constraints: const BoxConstraints(maxWidth: 280),
++            child: Card(
++              margin: const EdgeInsets.only(bottom: 8),
++              child: Padding(
++                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++                child: Text(label, maxLines: 4, overflow: TextOverflow.ellipsis),
++              ),
++            ),
++          ),
++        GestureDetector(
++          onLongPress: () => showVoiceSettingsSheet(context),
++          child: FloatingActionButton.small(
++            heroTag: null,
++            backgroundColor: color,
++            tooltip: 'Giọng nói (giữ để cài đặt)',
++            onPressed: _onTap,
++            child: Icon(icon),
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++/// Bảng cài đặt giọng nói. Mở bằng cách nhấn giữ nút micro.
++Future<void> showVoiceSettingsSheet(BuildContext context) {
++  final s = Stores.setting;
++  return showModalBottomSheet<void>(
++    context: context,
++    showDragHandle: true,
++    isScrollControlled: true,
++    builder: (context) => StatefulBuilder(
++      builder: (context, setState) {
++        Widget toggle(
++          String title,
++          String sub,
++          bool Function() get,
++          void Function(bool) put,
++        ) => SwitchListTile(
++          title: Text(title),
++          subtitle: Text(sub),
++          value: get(),
++          onChanged: (v) {
++            put(v);
++            setState(() {});
++          },
++        );
++        final locale = s.voiceLocale.fetch();
++        final rate = s.voiceSpeechRate.fetch();
++        return SafeArea(
++          child: SingleChildScrollView(
++            child: Column(
++              mainAxisSize: MainAxisSize.min,
++              children: [
++                const ListTile(
++                  title: Text(
++                    'Giọng nói',
++                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
++                  ),
++                ),
++                toggle(
++                  'Tự gửi (Enter)',
++                  'Tắt để xem lại câu trước khi gửi',
++                  s.voiceAutoEnter.fetch,
++                  s.voiceAutoEnter.put,
++                ),
++                toggle(
++                  'Đọc câu trả lời',
++                  'Đọc thành tiếng khi Claude Code / Codex làm xong',
++                  s.voiceSpeakReply.fetch,
++                  s.voiceSpeakReply.put,
++                ),
++                toggle(
++                  'Chế độ hội thoại',
++                  'Đọc xong tự nghe tiếp, rảnh tay hoàn toàn',
++                  s.voiceConversation.fetch,
++                  s.voiceConversation.put,
++                ),
++                toggle(
++                  'Khẩu lệnh',
++                  '"đồng ý" = Enter, "từ chối" / "dừng lại" = Esc',
++                  s.voiceKeywords.fetch,
++                  s.voiceKeywords.put,
++                ),
++                ListTile(
++                  title: const Text('Ngôn ngữ'),
++                  trailing: SegmentedButton<String>(
++                    segments: const [
++                      ButtonSegment(value: 'vi-VN', label: Text('Tiếng Việt')),
++                      ButtonSegment(value: 'en-US', label: Text('English')),
++                    ],
++                    selected: {locale},
++                    onSelectionChanged: (v) {
++                      s.voiceLocale.put(v.first);
++                      setState(() {});
++                    },
++                  ),
++                ),
++                ListTile(
++                  title: Text('Tốc độ đọc: ${rate.toStringAsFixed(1)}'),
++                  subtitle: Slider(
++                    value: rate,
++                    min: 0.1,
++                    max: 1.0,
++                    divisions: 9,
++                    onChanged: (v) {
++                      s.voiceSpeechRate.put(v);
++                      setState(() {});
++                    },
++                  ),
++                ),
++                toggle(
++                  'Hiện nút micro',
++                  'Tắt hẳn tính năng (mở lại trong Cài đặt của app)',
++                  s.voiceEnabled.fetch,
++                  s.voiceEnabled.put,
++                ),
++              ],
++            ),
++          ),
++        );
++      },
++    ),
++  );
++}
+diff --git a/pubspec.yaml b/pubspec.yaml
+index 227c36e..3cd7a7b 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -125,6 +125,10 @@ dependencies:
+   cross_file: ^0.3.5+4
+   collection: ^1.19.1
+   flutter_local_notifications: ^22.3.1
++  # Giọng nói trong terminal (bản cá nhân): nhận dạng giọng nói và đọc
++  # thành tiếng, đều dùng engine có sẵn của Android / iOS.
++  speech_to_text: ^7.0.0
++  flutter_tts: ^4.2.0
+ dependency_overrides:
+   # fl_pi_llm_ui asks for fl_lib from git; the submodule is the one.
+   fl_lib:
+diff --git a/test/unit/voice/reply_extractor_test.dart b/test/unit/voice/reply_extractor_test.dart
+new file mode 100644
+index 0000000..fcbdda0
+--- /dev/null
++++ b/test/unit/voice/reply_extractor_test.dart
+@@ -0,0 +1,62 @@
++import 'package:server_box/core/voice/reply_extractor.dart';
++import 'package:test/test.dart';
++
++void main() {
++  group('extractAgentReply', () {
++    test('Claude Code: lấy câu trả lời, bỏ tool call và kết quả tool', () {
++      const screen = [
++        '> sửa lỗi build trong file main',
++        '',
++        '⏺ Mình sẽ xem file main trước.',
++        '',
++        '⏺ Read(lib/main.dart)',
++        '  ⎿  Read 120 lines (ctrl+r to expand)',
++        '     import foo',
++        '',
++        '⏺ Đã sửa xong. Lỗi do thiếu dấu chấm phẩy ở dòng 42.',
++        '',
++        '╭──────────────────────────────────────────────╮',
++        '│ >                                            │',
++        '╰──────────────────────────────────────────────╯',
++        '  ? for shortcuts',
++      ];
++      expect(
++        extractAgentReply(screen, 'sửa lỗi build trong file main'),
++        'Mình sẽ xem file main trước. Đã sửa xong. Lỗi do thiếu dấu chấm phẩy ở dòng 42.',
++      );
++    });
++
++    test('Codex: dấu nhắc › và ô nhập kiểu đường kẻ', () {
++      const screen = [
++        '› liệt kê các file',
++        '',
++        '• Ran ls',
++        '• Thư mục có 3 file: a.txt, b.txt và **c.txt**.',
++        '',
++        '────────────────────────────────────────',
++        '›',
++      ];
++      expect(
++        extractAgentReply(screen, 'liệt kê các file'),
++        'Thư mục có 3 file: a.txt, b.txt và c.txt.',
++      );
++    });
++
++    test('không thấy câu đã gửi thì trả về rỗng', () {
++      expect(extractAgentReply(const ['abc'], 'xyz'), '');
++    });
++
++    test('cắt ở cuối câu khi quá dài', () {
++      final long = List.filled(50, 'Câu này dài.').join(' ');
++      final out = extractAgentReply(['> hỏi', long], 'hỏi', maxChars: 100);
++      expect(out.length, lessThanOrEqualTo(100));
++      expect(out.endsWith('.'), isTrue);
++    });
++  });
++
++  test('agentLooksBusy', () {
++    expect(agentLooksBusy(const ['✻ Thinking… (esc to interrupt)']), isTrue);
++    expect(agentLooksBusy(const ['Working (5s • Esc to interrupt)']), isTrue);
++    expect(agentLooksBusy(const ['> ']), isFalse);
++  });
++}
+-- 
+2.43.0
+
